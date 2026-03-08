@@ -1,6 +1,6 @@
 # 🦀 ClawScrap
 
-**Browser automation extension** — A Chrome extension that connects to [ClawBridge](https://github.com/user/clawbridge) server to automate browser tasks like AI image generation and social media posting.
+**Browser automation extension** — A Chrome extension that connects to [ClawBridge](https://github.com/benteckxyz/clawbridge) server to automate browser tasks like AI image generation and social media posting.
 
 ---
 
@@ -15,7 +15,7 @@
 ## 📋 Requirements
 
 - **Google Chrome** browser
-- **[ClawBridge](https://github.com/user/clawbridge)** server running
+- **[ClawBridge](https://github.com/benteckxyz/clawbridge)** server running
 - Accounts logged in on target websites (X, Facebook, Google Flow)
 
 ## 🚀 Setup
