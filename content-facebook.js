@@ -30,10 +30,159 @@ window.__clawscrap_fb_listener = function (message, _sender, sendResponse) {
             });
         return true; // async
     }
+
+    if (message.type === 'reply_facebook_comment') {
+        console.log('[ClawScrap FB] Received reply_facebook_comment command');
+        // CDP-ready: content script only finds coordinates, background does the clicking/typing
+        findCommentInputCoords(message.commentId || null)
+            .then(result => sendResponse({ success: true, ...result }))
+            .catch(error => {
+                console.error('[ClawScrap FB] ❌ Reply coord error:', error.message);
+                sendResponse({ success: false, error: error.message });
+            });
+        return true;
+    }
+
+    // After CDP click opened the input, find the active editor coords for typing
+    if (message.type === 'get_comment_editor_coords') {
+        getCommentEditorCoords()
+            .then(result => sendResponse({ success: true, ...result }))
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
+
     return false;
 };
 
 chrome.runtime.onMessage.addListener(window.__clawscrap_fb_listener);
+
+// ============================================
+// CDP Coordinate Finders (no clicking/typing here)
+// Background.js uses these coords to drive CDP
+// ============================================
+
+// Returns center coords of the "Write a comment" button or reply button
+async function findCommentInputCoords(commentId) {
+    await waitFor(2000);
+
+    if (commentId) {
+        return await findReplyButtonCoords(commentId);
+    } else {
+        return await findMainCommentButtonCoords();
+    }
+}
+
+// Find "Write a comment..." placeholder box or "Comment" button for the post
+async function findMainCommentButtonCoords() {
+    const commentPlaceholders = ['write a comment', 'viết bình luận', 'comment', 'bình luận'];
+
+    // Strategy 1: find contenteditable with comment placeholder
+    const editors = document.querySelectorAll('[contenteditable="true"]');
+    for (const el of editors) {
+        const ph = (el.getAttribute('aria-placeholder') || el.getAttribute('placeholder') || '').toLowerCase();
+        if (commentPlaceholders.some(t => ph.includes(t))) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await waitFor(400);
+            const coords = getCenterCoords(el);
+            console.log('[ClawScrap FB] Found comment editor at', coords);
+            return { ...coords, type: 'editor' };
+        }
+    }
+
+    // Strategy 2: find "Comment" button to open the editor
+    const allBtns = document.querySelectorAll('[role="button"], div[tabindex]');
+    for (const btn of allBtns) {
+        const t = (btn.textContent || '').trim();
+        if (t === 'Comment' || t === 'Bình luận' ||
+            (btn.getAttribute('aria-label') || '').toLowerCase().includes('comment')) {
+            btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await waitFor(400);
+            const coords = getCenterCoords(btn);
+            console.log('[ClawScrap FB] Found Comment button at', coords);
+            return { ...coords, type: 'button' };
+        }
+    }
+
+    throw new Error('Could not find comment input on this post');
+}
+
+// Find Reply button near a specific comment by id
+async function findReplyButtonCoords(commentId) {
+    const selectors = [
+        `[data-commentid="${commentId}"]`,
+        `[id="${commentId}"]`,
+        `a[href*="comment_id=${commentId}"]`,
+    ];
+
+    let commentEl = null;
+    for (const sel of selectors) {
+        commentEl = document.querySelector(sel);
+        if (commentEl) break;
+    }
+
+    if (!commentEl) {
+        const links = document.querySelectorAll('a[href*="comment_id"]');
+        for (const link of links) {
+            if (link.href.includes(commentId)) {
+                commentEl = link.closest('[role="article"]') || link.parentElement;
+                break;
+            }
+        }
+    }
+
+    if (!commentEl) throw new Error(`Comment ${commentId} not found in DOM`);
+
+    commentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await waitFor(800);
+
+    const container = commentEl.closest('[role="article"]') || commentEl.parentElement;
+    const replyLabels = ['Reply', 'Phản hồi', 'Trả lời'];
+    const spans = container?.querySelectorAll('span, div[role="button"]') || [];
+
+    for (const el of spans) {
+        if (replyLabels.includes((el.textContent || '').trim())) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await waitFor(300);
+            const coords = getCenterCoords(el);
+            console.log('[ClawScrap FB] Found Reply button at', coords);
+            return { ...coords, type: 'reply_button' };
+        }
+    }
+
+    throw new Error('Reply button not found near comment');
+}
+
+// After CDP click opened the comment input, find the active editor
+async function getCommentEditorCoords() {
+    await waitFor(600);
+    const phs = ['write a comment', 'viết bình luận', 'write a reply', 'viết phản hồi', 'reply', 'comment', 'bình luận'];
+
+    const editors = [...document.querySelectorAll('[contenteditable="true"]')];
+    for (const el of editors) {
+        const ph = (el.getAttribute('aria-placeholder') || el.getAttribute('placeholder') || '').toLowerCase();
+        if (phs.some(t => ph.includes(t))) {
+            const coords = getCenterCoords(el);
+            console.log('[ClawScrap FB] Found editor for typing at', coords);
+            return coords;
+        }
+    }
+
+    // Fallback: last editor (usually the newly active one)
+    const last = editors[editors.length - 1];
+    if (last) return getCenterCoords(last);
+
+    throw new Error('Active comment editor not found');
+}
+
+function getCenterCoords(el) {
+    const rect = el.getBoundingClientRect();
+    return {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+    };
+}
+
+
 
 // ============================================
 // Find Composer Dialog

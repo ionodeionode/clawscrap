@@ -27,6 +27,12 @@ const PLUGINS = {
         label: '📘 Post to Facebook',
         useCDP: false,
     },
+    'reply_facebook_comment': {
+        urlPatterns: ['https://www.facebook.com/*'],
+        contentScript: 'content-facebook.js',
+        label: '💬 Reply on Facebook',
+        useCDP: false,
+    },
 };
 
 // Job types this extension handles
@@ -209,6 +215,8 @@ function stopPolling() {
 async function processJob(job) {
     try {
         isProcessing = true;
+        setIcon('working'); // orange icon while processing
+
         const plugin = PLUGINS[job.type];
 
         if (!plugin) {
@@ -227,8 +235,17 @@ async function processJob(job) {
         await reportJobResult(job.id, 'failed', null, error.message);
     } finally {
         isProcessing = false;
+        setIcon('idle'); // back to normal crab icon
     }
 }
+
+function setIcon(state) {
+    const paths = state === 'working'
+        ? { 16: 'icons/icon_working_16.png', 48: 'icons/icon_working_48.png', 128: 'icons/icon_working_128.png' }
+        : { 16: 'icons/icon16.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' };
+    chrome.action.setIcon({ path: paths });
+}
+
 
 async function routeToPlugin(job, plugin) {
     // Find matching tab
@@ -256,6 +273,8 @@ async function routeToPlugin(job, plugin) {
         return await handlePostX(tab.id, job);
     } else if (job.type === 'post_facebook') {
         return await handlePostFacebook(tab.id, job);
+    } else if (job.type === 'reply_facebook_comment') {
+        return await handleReplyFacebookComment(tab.id, job);
     }
 
     throw new Error(`No handler for job type: ${job.type}`);
@@ -267,19 +286,59 @@ async function routeToPlugin(job, plugin) {
 
 async function handleFlowGenerate(tabId, job) {
     const { prompt, count } = job.payload;
+    const debugTarget = { tabId };
 
+    // Step 1: Focus + clear textbox (content script)
     console.log('[ClawScrap BG] Flow: Focus + clear textbox');
     await sendMessageWithRetry(tabId, { type: 'focus_textbox' }, 3);
-    await randomDelay(1000, 3000);
+    await randomDelay(500, 1000);
 
+    // Step 2: Type prompt via CDP char-by-char (keeps debugger attached)
     console.log('[ClawScrap BG] Flow: Type prompt via CDP');
-    await typeTextViaCDP(tabId, prompt);
-    await randomDelay(2000, 5000);
+    try {
+        await chrome.debugger.attach(debugTarget, '1.3');
+        console.log('[ClawScrap BG] Debugger attached');
 
-    console.log('[ClawScrap BG] Flow: Click Generate + capture');
+        for (let i = 0; i < prompt.length; i++) {
+            const char = prompt[i];
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'keyDown', key: char, text: char, unmodifiedText: char,
+            });
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'char', key: char, text: char, unmodifiedText: char,
+            });
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'keyUp', key: char, text: char, unmodifiedText: char,
+            });
+            if (i % 5 === 0) await sleep(20 + Math.random() * 30);
+        }
+        console.log(`[ClawScrap BG] ✅ Typed ${prompt.length} chars`);
+
+        // Step 3: Human-like pause before clicking Generate
+        await randomDelay(1500, 3000);
+
+        // Step 4: Get Generate button coordinates from content script
+        const coords = await sendMessageWithRetry(tabId, { type: 'get_generate_coords' }, 3);
+        if (!coords || !coords.x) throw new Error('Could not get Generate button coordinates');
+        console.log(`[ClawScrap BG] Generate button at (${coords.x}, ${coords.y})`);
+
+        // Step 5: Click Generate via CDP (isTrusted = true!)
+        await cdpMouseClick(debugTarget, coords.x, coords.y);
+        console.log('[ClawScrap BG] ✅ Generate clicked via CDP');
+        await sleep(500);
+
+    } finally {
+        try {
+            await chrome.debugger.detach(debugTarget);
+            console.log('[ClawScrap BG] Debugger detached');
+        } catch (e) { /* ignore */ }
+    }
+
+    // Step 6: Content script just waits for images (Generate already clicked)
+    console.log('[ClawScrap BG] Flow: Waiting for images...');
     return sendMessageWithRetry(tabId, {
         type: 'click_and_capture',
-        payload: { jobId: job.id, count: count || 1 },
+        payload: { jobId: job.id, count: count || 1, clickViaCDP: true },
     }, 3);
 }
 
@@ -315,6 +374,117 @@ async function handlePostFacebook(tabId, job) {
 }
 
 // ============================================
+// Reply Facebook Comment Handler
+// ============================================
+
+async function handleReplyFacebookComment(tabId, job) {
+    const { postUrl, text, commentId } = job.payload;
+    const debugTarget = { tabId };
+
+    console.log('[ClawScrap BG] Facebook Reply: Navigating to', postUrl);
+    await navigateTabAndWait(tabId, postUrl);
+    await sleep(3000);
+
+    await injectContentScript(tabId, 'content-facebook.js');
+    await sleep(1000);
+
+    // Step 1: Content script finds coordinates of the comment button/editor
+    console.log('[ClawScrap BG] Facebook Reply: Finding comment input coords...');
+    const coordsResp = await sendMessageWithRetry(tabId, {
+        type: 'reply_facebook_comment',
+        commentId: commentId || null,
+    }, 3);
+
+    if (!coordsResp || !coordsResp.x) {
+        throw new Error('Could not get comment element coordinates from content script');
+    }
+
+    const { x, y, type: elemType } = coordsResp;
+    console.log(`[ClawScrap BG] Got coords: (${x}, ${y}) type=${elemType}`);
+
+    // Step 2: Attach CDP and do ALL clicks/typing via CDP (isTrusted = true)
+    try {
+        await chrome.debugger.attach(debugTarget, '1.3');
+        console.log('[ClawScrap BG] 🔌 Debugger attached for reply');
+
+        // CDP click on the comment button/editor
+        await cdpMouseClick(debugTarget, x, y);
+        await sleep(800);
+
+        // If it was a button (not the editor itself), get editor coords after click
+        if (elemType !== 'editor') {
+            await injectContentScript(tabId, 'content-facebook.js');
+            const editorResp = await sendMessageWithRetry(tabId, {
+                type: 'get_comment_editor_coords'
+            }, 3);
+            if (editorResp?.x) {
+                await cdpMouseClick(debugTarget, editorResp.x, editorResp.y);
+                await sleep(500);
+            }
+        }
+
+        // CDP type the text (isTrusted = true, focused element receives it)
+        await chrome.debugger.sendCommand(debugTarget, 'Input.insertText', { text });
+        console.log(`[ClawScrap BG] ✅ CDP typed ${text.length} chars`);
+        await sleep(600);
+
+        // CDP press Enter to submit (isTrusted = true)
+        await cdpPressEnter(debugTarget);
+        console.log('[ClawScrap BG] ✅ CDP Enter pressed — comment submitted');
+        await sleep(1500);
+
+    } finally {
+        try {
+            await chrome.debugger.detach(debugTarget);
+            console.log('[ClawScrap BG] 🔌 Debugger detached');
+        } catch (e) { /* ignore */ }
+    }
+
+    return { success: true, message: 'Reply posted on Facebook successfully via CDP' };
+}
+
+// CDP mouse click at viewport coordinates
+async function cdpMouseClick(debugTarget, x, y) {
+    const params = { x, y, button: 'left', clickCount: 1, modifiers: 0 };
+    await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchMouseEvent', { ...params, type: 'mousePressed' });
+    await sleep(80);
+    await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchMouseEvent', { ...params, type: 'mouseReleased' });
+    console.log(`[ClawScrap BG] CDP click at (${x}, ${y})`);
+}
+
+// CDP Enter key press
+async function cdpPressEnter(debugTarget) {
+    const key = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+    await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', { ...key, type: 'keyDown' });
+    await sleep(50);
+    await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', { ...key, type: 'keyUp' });
+}
+
+// Navigate a tab to a URL and wait for it to finish loading
+function navigateTabAndWait(tabId, url) {
+    return new Promise((resolve, reject) => {
+        chrome.tabs.update(tabId, { url }, () => {
+            if (chrome.runtime.lastError) {
+                return reject(new Error(chrome.runtime.lastError.message));
+            }
+            const listener = (updatedTabId, changeInfo) => {
+                if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                    chrome.tabs.onUpdated.removeListener(listener);
+                    resolve();
+                }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+            // Safety timeout
+            setTimeout(() => {
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+            }, 15000);
+        });
+    });
+}
+
+
+// ============================================
 // CDP Text Input (Trusted Events)
 // ============================================
 
@@ -325,12 +495,39 @@ async function typeTextViaCDP(tabId, text) {
         await chrome.debugger.attach(debugTarget, '1.3');
         console.log('[ClawScrap BG] Debugger attached');
 
-        await chrome.debugger.sendCommand(debugTarget, 'Input.insertText', {
-            text: text,
-        });
-        console.log(`[ClawScrap BG] CDP typed ${text.length} chars`);
+        // Type each character individually via keyboard events
+        // This triggers React's synthetic event system (unlike insertText which doesn't)
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            // keyDown
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'keyDown',
+                key: char,
+                text: char,
+                unmodifiedText: char,
+            });
+            // char event (actual text input)
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'char',
+                key: char,
+                text: char,
+                unmodifiedText: char,
+            });
+            // keyUp
+            await chrome.debugger.sendCommand(debugTarget, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: char,
+                text: char,
+                unmodifiedText: char,
+            });
 
+            // Small random delay between chars for human-like typing
+            if (i % 5 === 0) await sleep(20 + Math.random() * 30);
+        }
+
+        console.log(`[ClawScrap BG] ✅ CDP typed ${text.length} chars (char-by-char)`);
         await sleep(300);
+
     } catch (err) {
         console.error('[ClawScrap BG] CDP error:', err.message);
         throw new Error(`CDP text input failed: ${err.message}`);
@@ -343,6 +540,7 @@ async function typeTextViaCDP(tabId, text) {
         }
     }
 }
+
 
 // ============================================
 // Report Results

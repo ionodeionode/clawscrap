@@ -44,6 +44,13 @@ window.__flowBridgeListener = function (msg, _sender, sendResponse) {
             });
         return true;
     }
+    if (msg.type === 'get_generate_coords') {
+        console.log('[ClawScrap Content] Received: get_generate_coords');
+        getGenerateButtonCoords()
+            .then(coords => sendResponse({ success: true, ...coords }))
+            .catch(err => sendResponse({ success: false, error: err.message }));
+        return true;
+    }
 
     return false;
 };
@@ -86,10 +93,18 @@ async function handleFocusTextbox() {
 // ============================================
 
 async function handleClickAndCapture(payload) {
-    const { count } = payload;
+    const { count, clickViaCDP } = payload;
 
-    // Click the Generate button
-    await clickGenerate();
+    if (clickViaCDP) {
+        // Background already clicked Generate via CDP, just wait for images
+        console.log('[ClawScrap Content] Generate clicked via CDP, waiting for images...');
+    } else {
+        // Fallback: click Generate from content script
+        const pauseMs = 1000 + Math.random() * 1000;
+        console.log(`[ClawScrap Content] ⏸ Pausing ${Math.round(pauseMs)}ms before clicking Generate...`);
+        await sleep(pauseMs);
+        await clickGenerate();
+    }
 
     // Wait for image(s) to appear
     const images = await waitForImages(count || 1);
@@ -99,6 +114,34 @@ async function handleClickAndCapture(payload) {
     const imageUrls = images.map(img => img.src).filter(Boolean);
 
     return { imageBase64, imageUrls };
+}
+
+// Return Generate button coordinates for CDP click
+async function getGenerateButtonCoords() {
+    const allButtons = [...document.querySelectorAll('button')];
+
+    let generateBtn = null;
+    for (const btn of allButtons) {
+        if (btn.innerHTML.includes('arrow_forward')) { generateBtn = btn; break; }
+    }
+    if (!generateBtn) {
+        for (const btn of allButtons) {
+            if (btn.textContent.trim().includes('arrow_forward') && btn.textContent.trim().includes('Tạo')) { generateBtn = btn; break; }
+        }
+    }
+    if (!generateBtn) generateBtn = document.querySelector('button[aria-label*="Generate"]') || document.querySelector('button[aria-label*="Tạo"]');
+
+    if (!generateBtn) throw new Error('Generate button not found');
+    if (generateBtn.disabled) {
+        await sleep(2000);
+        if (generateBtn.disabled) throw new Error('Generate button is disabled');
+    }
+
+    const rect = generateBtn.getBoundingClientRect();
+    return {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+    };
 }
 
 

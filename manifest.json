@@ -1,7 +1,8 @@
 {
     "manifest_version": 3,
     "name": "ClawScrap",
-    "version": "2.0.0",
+    "version": "2026.3.8",
+    "version_name": "Alpha 2026.03.08",
     "description": "Browser automation extension for ClawBridge — AI image gen, social posting via plugin system",
     "permissions": [
         "activeTab",
