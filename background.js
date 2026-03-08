@@ -50,12 +50,55 @@ function authHeaders() {
     return headers;
 }
 
-// Load saved config
+// Load saved config and start on boot
 chrome.storage.local.get(['serverUrl', 'apiKey'], (result) => {
     if (result.serverUrl) serverUrl = result.serverUrl;
     if (result.apiKey) apiKey = result.apiKey;
     connectAndStartPolling();
 });
+
+// ============================================
+// Keep-Alive via Chrome Alarms (MV3 fix)
+// Service workers get suspended after ~30s idle.
+// Alarm wakes it up every 25s to keep polling alive.
+// ============================================
+
+chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 }); // every ~24s
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'keepAlive') {
+        // Re-read config in case it changed
+        chrome.storage.local.get(['serverUrl', 'apiKey'], (result) => {
+            if (result.serverUrl) serverUrl = result.serverUrl;
+            if (result.apiKey) apiKey = result.apiKey;
+        });
+        // Restart polling if it died
+        if (!pollingInterval) {
+            console.log('[ClawScrap BG] ⏰ Alarm: restarting polling...');
+            connectAndStartPolling();
+        }
+    }
+});
+
+// Also restart polling when Chrome starts or extension is installed
+chrome.runtime.onStartup.addListener(() => {
+    console.log('[ClawScrap BG] 🚀 Chrome started — connecting to bridge...');
+    chrome.storage.local.get(['serverUrl', 'apiKey'], (result) => {
+        if (result.serverUrl) serverUrl = result.serverUrl;
+        if (result.apiKey) apiKey = result.apiKey;
+        connectAndStartPolling();
+    });
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+    console.log('[ClawScrap BG] 🔌 Extension installed — connecting to bridge...');
+    chrome.storage.local.get(['serverUrl', 'apiKey'], (result) => {
+        if (result.serverUrl) serverUrl = result.serverUrl;
+        if (result.apiKey) apiKey = result.apiKey;
+        connectAndStartPolling();
+    });
+});
+
 
 // ============================================
 // Bridge Connection
