@@ -1,0 +1,67 @@
+{
+    "manifest_version": 3,
+    "name": "ClawScrap",
+    "version": "2.0.0",
+    "description": "Browser automation extension for ClawBridge — AI image gen, social posting via plugin system",
+    "permissions": [
+        "activeTab",
+        "storage",
+        "tabs",
+        "scripting",
+        "debugger"
+    ],
+    "host_permissions": [
+        "https://labs.google/*",
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://www.facebook.com/*",
+        "http://localhost:3002/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://labs.google/fx/*",
+                "https://labs.google/flow/*"
+            ],
+            "js": [
+                "content-flow.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://x.com/*",
+                "https://twitter.com/*"
+            ],
+            "js": [
+                "content-x.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://www.facebook.com/*"
+            ],
+            "js": [
+                "content-facebook.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon48.png",
+            "128": "icons/icon128.png"
+        }
+    },
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    }
+}
