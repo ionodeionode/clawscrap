@@ -33,6 +33,24 @@ const PLUGINS = {
         label: '💬 Reply on Facebook',
         useCDP: false,
     },
+    'search_google': {
+        urlPatterns: ['https://www.google.com/*', 'https://google.com/*'],
+        contentScript: 'content-search-google.js',
+        label: '🔍 Google Search',
+        useCDP: false,
+    },
+    'search_x': {
+        urlPatterns: ['https://x.com/*', 'https://twitter.com/*'],
+        contentScript: 'content-search-x.js',
+        label: '🐦 X Search',
+        useCDP: false,
+    },
+    'fetch_x_profile': {
+        urlPatterns: ['https://x.com/*', 'https://twitter.com/*'],
+        contentScript: 'content-x-profile.js',
+        label: '👤 Fetch X Profile',
+        useCDP: false,
+    },
 };
 
 // Job types this extension handles
@@ -225,7 +243,17 @@ async function processJob(job) {
 
         console.log(`[ClawScrap BG] ${plugin.label} — Processing job: ${job.id.substring(0, 8)}...`);
 
-        const result = await routeToPlugin(job, plugin);
+        // Search/fetch jobs manage their own tab (create → navigate → scrape → close)
+        let result;
+        if (job.type === 'search_google') {
+            result = await handleSearchGoogle(job);
+        } else if (job.type === 'search_x') {
+            result = await handleSearchX(job);
+        } else if (job.type === 'fetch_x_profile') {
+            result = await handleFetchXProfile(job);
+        } else {
+            result = await routeToPlugin(job, plugin);
+        }
 
         await reportJobResult(job.id, 'completed', result);
         console.log(`[ClawScrap BG] ✅ Job completed: ${job.id.substring(0, 8)}...`);
@@ -275,6 +303,10 @@ async function routeToPlugin(job, plugin) {
         return await handlePostFacebook(tab.id, job);
     } else if (job.type === 'reply_facebook_comment') {
         return await handleReplyFacebookComment(tab.id, job);
+    } else if (job.type === 'search_google') {
+        return await handleSearchGoogle(tab.id, job);
+    } else if (job.type === 'search_x') {
+        return await handleSearchX(tab.id, job);
     }
 
     throw new Error(`No handler for job type: ${job.type}`);
@@ -371,6 +403,95 @@ async function handlePostFacebook(tabId, job) {
         mediaUrls: mediaUrls || [],
         target: target || null,
     }, 3);
+}
+
+// ============================================
+// Search Google Handler
+// ============================================
+
+async function handleSearchGoogle(job) {
+    const { query, count = 10, sort } = job.payload;
+    const sortParam = sort ? `&tbs=${sort}` : '';
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${Math.min(count, 100)}${sortParam}`;
+
+    console.log(`[ClawScrap BG] Google Search: opening tab for "${query}"`);
+    const tab = await chrome.tabs.create({ url, active: false });
+    try {
+        await waitForTabComplete(tab.id);
+        await sleep(4000); // wait for results to fully render
+
+        await injectContentScript(tab.id, 'content-search-google.js');
+        await sleep(500);
+
+        const result = await sendMessageWithRetry(tab.id, { type: 'scrape_google', count }, 3);
+        console.log(`[ClawScrap BG] ✅ Google: got ${result.organic?.length || 0} results`);
+        return { organic: result.organic, peopleAlsoAsk: result.peopleAlsoAsk, totalResultsText: result.totalResultsText };
+    } finally {
+        chrome.tabs.remove(tab.id).catch(() => { });
+    }
+}
+
+// ============================================
+// Fetch X Profile Handler
+// ============================================
+
+async function handleFetchXProfile(job) {
+    const { profileUrl, count = 10, includeReplies = false } = job.payload;
+
+    // Normalize URL: accepts full URL or just handle (@JL1kin or JL1kin)
+    let url = profileUrl;
+    if (!url.startsWith('http')) {
+        const handle = url.replace(/^@/, '');
+        url = `https://x.com/${handle}`;
+    }
+
+    console.log(`[ClawScrap BG] X Profile: opening tab for ${url}`);
+    const tab = await chrome.tabs.create({ url, active: false });
+    try {
+        await waitForTabComplete(tab.id);
+        await sleep(4000); // wait for timeline to load
+
+        await injectContentScript(tab.id, 'content-x-profile.js');
+        await sleep(500);
+
+        const result = await sendMessageWithRetry(tab.id, {
+            type: 'scrape_x_profile',
+            count,
+            includeReplies,
+        }, 3);
+
+        console.log(`[ClawScrap BG] ✅ X Profile @${result.handle}: got ${result.tweets?.length || 0} tweets`);
+        return { handle: result.handle, displayName: result.displayName, tweets: result.tweets };
+    } finally {
+        chrome.tabs.remove(tab.id).catch(() => { });
+    }
+}
+
+// ============================================
+// Search X Handler
+// ============================================
+
+async function handleSearchX(job) {
+    const { query, count = 10, sort = 'latest' } = job.payload;
+    const sortMap = { latest: 'live', top: 'top', people: 'user', media: 'media' };
+    const f = sortMap[sort] || 'live';
+    const url = `https://x.com/search?q=${encodeURIComponent(query)}&src=typed_query&f=${f}`;
+
+    console.log(`[ClawScrap BG] X Search: opening tab for "${query}" [${sort}]`);
+    const tab = await chrome.tabs.create({ url, active: false });
+    try {
+        await waitForTabComplete(tab.id);
+        await sleep(5000); // wait for tweets to load
+
+        await injectContentScript(tab.id, 'content-search-x.js');
+        await sleep(500);
+
+        const result = await sendMessageWithRetry(tab.id, { type: 'scrape_x', count }, 3);
+        console.log(`[ClawScrap BG] ✅ X: got ${result.tweets?.length || 0} tweets`);
+        return { tweets: result.tweets };
+    } finally {
+        chrome.tabs.remove(tab.id).catch(() => { });
+    }
 }
 
 // ============================================
@@ -482,6 +603,28 @@ function navigateTabAndWait(tabId, url) {
         });
     });
 }
+
+// Wait for an already-created tab to finish loading
+function waitForTabComplete(tabId) {
+    return new Promise((resolve) => {
+        // Check if already complete
+        chrome.tabs.get(tabId, (tab) => {
+            if (tab && tab.status === 'complete') return resolve();
+            const listener = (updatedTabId, changeInfo) => {
+                if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                    chrome.tabs.onUpdated.removeListener(listener);
+                    resolve();
+                }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+            setTimeout(() => {
+                chrome.tabs.onUpdated.removeListener(listener);
+                resolve();
+            }, 15000);
+        });
+    });
+}
+
 
 
 // ============================================
@@ -601,9 +744,14 @@ async function sendMessageWithRetry(tabId, message, retries) {
         } catch (err) {
             console.log(`[ClawScrap BG] Attempt ${attempt}/${retries} failed: ${err.message}`);
             if (attempt < retries) {
-                const scriptFile = message.type === 'post_tweet' ? 'content-x.js'
-                    : message.type === 'post_facebook' ? 'content-facebook.js'
-                        : 'content-flow.js';
+                const scriptMap = {
+                    'post_tweet': 'content-x.js',
+                    'post_facebook': 'content-facebook.js',
+                    'reply_facebook_comment': 'content-facebook.js',
+                    'scrape_google': 'content-search-google.js',
+                    'scrape_x': 'content-search-x.js',
+                };
+                const scriptFile = scriptMap[message.type] || 'content-flow.js';
                 await injectContentScript(tabId, scriptFile);
                 await sleep(1500);
             } else {
