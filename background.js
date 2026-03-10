@@ -60,8 +60,8 @@ const HANDLED_TYPES = Object.keys(PLUGINS);
 // Configuration
 // ============================================
 
-let serverUrl = 'http://localhost:3002';
-let apiKey = '';
+let serverUrl = 'https://clawbridge.benteck.xyz';
+let apiKey = 'cb_fc2d7402c5ccc482e012ad8c861ae9fbe4301b0ee6885f8a';
 let extensionId = null;     // assigned by bridge after connect
 let pollingInterval = null;
 let isProcessing = false;
